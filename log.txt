@@ -1,0 +1,279 @@
+========= COMPUTE-SANITIZER
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (64,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (65,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (66,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (67,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (68,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (69,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (70,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (71,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (72,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (73,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (74,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (75,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (76,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (77,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (78,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (79,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (80,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (81,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (82,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (83,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (84,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (85,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (86,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (87,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (88,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (89,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (90,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (91,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (92,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (93,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (94,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Out-of-range shared or local address
+=========     at umma_tile(const __half *, const __half *, float *, int)+0xa50 in matmul_tmem.cu:156
+=========     by thread (95,0,0) in block (0,0,0)
+=========     Saved host backtrace up to driver entry point at kernel launch time
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:279 [0xb712] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaDeviceSynchronize.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:280 [0xabd4] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaLaunchKernel.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:284 [0xac97] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaLaunchKernel.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:284 [0xac97] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaLaunchKernel.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:284 [0xac97] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaLaunchKernel.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:284 [0xac97] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaLaunchKernel.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:284 [0xac97] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaDeviceSynchronize.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:285 [0xaca9] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaMemcpy.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:291 [0xacc8] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+========= Program hit cudaErrorIllegalAddress (error 700) due to "an illegal memory access was encountered" on CUDA API call to cudaGetLastError.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: run_benchmark() in matmul_tmem.cu:293 [0xaccd] in matmul_tmem
+=========         Host Frame: main in matmul_tmem.cu:382 [0x9c73] in matmul_tmem
+========= 
+--------------------  M=128 N=64 K=64  --------------------
+Block size: 128×64 (single CTA)
+Host data initialised
+CPU reference done
+device buffer done
+warmup done
+CUDA error: an illegal memory access was encountered (matmul_tmem.cu:293)
+========= Target application returned an error
+========= ERROR SUMMARY: 41 errors

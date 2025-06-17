@@ -1,0 +1,5 @@
+Host data initialised
+CPU reference done
+device buffer done
+warmup done
+copied back, doing error checking
