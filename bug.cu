@@ -13,6 +13,20 @@
 #include <fstream>
 
 
+
+__device__ static inline int3 clusterIdx() {
+    int3 cluster_idx;
+    asm volatile("mov.u32 %0, %clusterid.x;\n" : "=r"(cluster_idx.x));
+    asm volatile("mov.u32 %0, %clusterid.y;\n" : "=r"(cluster_idx.y));
+    asm volatile("mov.u32 %0, %clusterid.z;\n" : "=r"(cluster_idx.z));
+    return cluster_idx;
+}
+__device__ static inline int cluster_ctarank() {
+    uint32_t ctarank;
+    asm volatile("mov.u32 %0, %cluster_ctarank;\n" : "=r"(ctarank));
+    return ctarank;
+}
+
 struct ProblemSize {
     int M, N, K;
 };
@@ -23,6 +37,42 @@ int swizzle(int r, int c) {
 constexpr int Mb = 128, Nb = 128, Kb = 64;
 using  Tab  = __half;
 using  Tacc = float;
+
+constexpr int BYTES_PER_TILE = Mb * Kb * sizeof(half);   // 8 KiB
+constexpr int BYTES_PER_CP   = 16;                       // cp.async granularity
+constexpr int CP_PER_TILE    = BYTES_PER_TILE / BYTES_PER_CP; // 512
+// ─── tile-layout constants (put right after CP_PER_THREAD) ──────────
+constexpr int HALF_T_BYTES = sizeof(half);             // 2
+
+constexpr int ROW_BYTES    = Kb * HALF_T_BYTES;        // 64 × 2 = 128 B
+constexpr int CP_PER_ROW   = ROW_BYTES / BYTES_PER_CP; // 128 / 16 = 8
+
+// BYTES_PER_CP is already defined (16) – use it directly,
+// or add an alias if you prefer the original name:
+constexpr int CP_BYTES = BYTES_PER_CP;
+static_assert(BYTES_PER_TILE % BYTES_PER_CP == 0, "tile must be 16-byte aligned");
+
+// Each thread in a 32-thread warp handles 16×8 = 128 B  (8 half4’s)
+constexpr int CP_PER_THREAD = CP_PER_TILE / 128; 
+
+
+
+// ---- 16-byte async copy from global to shared -------------------
+__device__ __forceinline__ void cp_async_16B(const void* gmem_src,
+                                            const void* smem_dst)
+{
+    // • Convert *shared* pointer to 32-bit address space
+    uint32_t smem_u32 =
+        static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst));
+
+    // • Global pointer stays 64-bit; constraint "l" or "r" both work.
+    asm volatile(
+        "cp.async.cg.shared.global [%0], [%1], 16;\n"
+        :: "r"(smem_u32),          // 32-bit SHARED addr   (dst)
+           "l"(gmem_src)           // 64-bit GENERIC addr  (src)
+        : "memory");
+}
+
 
 #ifdef DEBUG_UMMA
 #   define KDBG(fmt, ...)                                                        \
@@ -189,22 +239,20 @@ __device__ inline void mbarrier_wait(void* bar_b64)
     );
 }
 
-extern "C" __global__ void __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
-extern "C" __global__ void __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
+extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
+extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
     KDBG("kernel entry");
-
-    int tileM = blockIdx.y;      // 0 … 7
-    int tileN = blockIdx.x;      // 0 … 7
-    int tileK = blockIdx.z;      // 0 … 15
-
-    int row0 = tileM * Mb;
-    int col0 = tileN * Nb;
+    int clusterX   = clusterIdx().x;   
+    int rank       = cluster_ctarank(); 
+  
+    int tileK = blockIdx.z;      
     int k0   = tileK * Kb;
+    int tileM      = blockIdx.y;          
+
+    int row0 = tileM * Mb;      
+    int col0 = (clusterX * 2 + rank) * Nb; 
     __shared__ alignas(256) half A_smem[8192];
-    __shared__ alignas(256) half B_smem[8192];
-    // extern __shared__ Tab sm[];
-    // Tab* A_smem = sm;               // 128×64 = 8 KiB
-    // Tab* B_smem = sm + Mb*Kb;     
+    __shared__ alignas(256) half B_smem[8192];  
     alignas(64) float reg[128];
     __shared__ alignas(8) uint tmem_addr[1];
     /* ---- allocate 64-column TMEM -------------------------------- */
@@ -219,31 +267,67 @@ extern "C" __global__ void __launch_bounds__(128) umma_tile(half* __restrict__ A
         : "memory"
         );
     }
-    __syncthreads();
+    asm volatile("tcgen05.fence::before_thread_sync;\n");
+    asm volatile("bar.sync 0;\n");
+    asm volatile("tcgen05.fence::after_thread_sync;\n");
     for (int i = 0; i < 128; ++i) {
         reg[i] = 0.000000e+00f;
     }
-    const int elemsA = Mb * Kb;          // 128 × 64 = 8192 half
-    const int elemsB = Nb * Kb;          // 128 × 64 = 8192 half
 
-    for (int i = threadIdx.x;  i < elemsA;  i += blockDim.x) {
-        int r = i / Kb;                  // row inside tile
-        int c = i - r*Kb;                // col inside tile
-        int s = swizzle(r, c);           // shared-mem index
-        int g = (row0 + r) * prob.K + (k0 + c);
-        A_smem[s] = A[g];
+
+    int lane   = threadIdx.x & 31;
+    int warp   = threadIdx.x >> 5;
+    int row0_w = warp * 32;
+
+    const char* g_base_A = reinterpret_cast<const char*>(A) +
+        ((row0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
+
+    #pragma unroll
+    for (int j = 0; j < CP_PER_THREAD; ++j) {
+        int cp_idx  = j * 32 + lane;              // 0‥255
+        int row_off = cp_idx / CP_PER_ROW;        // 0‥31
+        int col_cp  = cp_idx % CP_PER_ROW;        // 0‥7
+
+        const char* g_src = g_base_A +
+            row_off * prob.K * HALF_T_BYTES +
+            col_cp * CP_BYTES;
+
+        int col    = col_cp * 8;                  // 8 halfs
+        int sm_idx = swizzle(row0_w + row_off, col);
+        char* s_dst = reinterpret_cast<char*>(&A_smem[sm_idx]);
+
+        cp_async_16B(g_src, s_dst);
     }
+    asm volatile("cp.async.commit_group;\n");
+    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
 
-    for (int i = threadIdx.x;  i < elemsB;  i += blockDim.x) {
-        int r = i / Kb;
-        int c = i - r*Kb;
-        int s = swizzle(r, c);
-        int g = (col0 + r) * prob.K + (k0 + c);
-        B_smem[s] = B[g];
+    const char* g_base_B = reinterpret_cast<const char*>(B) +
+        ((col0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
+
+    #pragma unroll
+    for (int j = 0; j < CP_PER_THREAD; ++j) {
+        int cp_idx  = j * 32 + lane;
+        int row_off = cp_idx / CP_PER_ROW;
+        int col_cp  = cp_idx % CP_PER_ROW;
+
+        const char* g_src = g_base_B +
+            row_off * prob.K * HALF_T_BYTES +
+            col_cp * CP_BYTES;
+
+        int col    = col_cp * 8;
+        int sm_idx = swizzle(row0_w + row_off, col);
+        char* s_dst = reinterpret_cast<char*>(&B_smem[sm_idx]);
+
+        cp_async_16B(g_src, s_dst);
     }
-    __syncthreads(); 
+    asm volatile("cp.async.commit_group;\n");
+    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
 
-    __syncthreads();
+
+
+        asm volatile("tcgen05.fence::before_thread_sync;\n");
+    asm volatile("bar.sync 0;\n");
+    asm volatile("tcgen05.fence::after_thread_sync;\n");
     KDBG("tiles copied to SMEM");
     __shared__ unsigned long long sem;
     if (((int)threadIdx.x) == 0) {
@@ -294,10 +378,14 @@ extern "C" __global__ void __launch_bounds__(128) umma_tile(half* __restrict__ A
     KDBG("waiting on mbarrier");
     mbarrier_wait<0>(&sem);
     KDBG("mbarrier passed");
-    __syncthreads();
+        asm volatile("tcgen05.fence::before_thread_sync;\n");
+    asm volatile("bar.sync 0;\n");
+    asm volatile("tcgen05.fence::after_thread_sync;\n");
+    asm volatile("tcgen05.fence::after_thread_sync;\n" ::: "memory");
 
     /* ---- read a single column from TMEM ------------------------- */
     if (threadIdx.x == 0) KDBG("loading from TMEM");
+    #pragma unroll
     for (int i_1 = 0; i_1 < 128; ++i_1) {
         
         {
@@ -320,22 +408,26 @@ extern "C" __global__ void __launch_bounds__(128) umma_tile(half* __restrict__ A
     int row = threadIdx.x;                       // 0 … 127 (row inside tile)
 
     int globalRow = row0 + row;                  // absolute row in C
-
+    #pragma unroll
     for (int n = 0; n < Nb; ++n) {               // Nb == 128
         int globalCol = col0 + n;                // absolute column in C
         int idx = globalRow * prob.N + globalCol;
 
         atomicAdd(&C[idx], reg[n]);              // merge partial sums
     }
-    __syncthreads();
+        asm volatile("tcgen05.fence::before_thread_sync;\n");
+    asm volatile("bar.sync 0;\n");
+    asm volatile("tcgen05.fence::after_thread_sync;\n");
     KDBG("column written to global");
     /* ---- deallocate --------------------------------------------- */
     if (((int)threadIdx.x) < 32) {
+        
         __asm__ __volatile__(
       "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
       :: "r"(tmem_addr[0]), "r"(512)
       : "memory"
     );
+
   }
 }
 
