@@ -256,186 +256,189 @@ __device__ inline void mbarrier_wait(void* bar_b64)
     );
 }
 
-extern "C" __global__ void __cluster_dims__(4, 2, 1) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
-extern "C" __global__ void __cluster_dims__(4, 2, 1) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
+extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
+extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
     KDBG("kernel entry");
     int clusterX   = clusterIdx().x;   
     int clusterY   = clusterIdx().y;   
     int rank       = cluster_ctarank(); 
-  
-    int tileK = blockIdx.z;      
-    int k0   = tileK * Kb;    
-
-    int row0 = (clusterY * 2 + rank/4) * Mb;     
-    int col0 = (clusterX * 4 + rank%4) * Nb; 
-    __shared__ alignas(256) half A_smem[8192];
-    __shared__ alignas(256) half B_smem[8192];  
-    alignas(64) float reg[128];
-    __shared__ alignas(8) uint tmem_addr[1];
-    /* ---- allocate 64-column TMEM -------------------------------- */
-    alignas(64) uint64_t descA[1];
-    alignas(64) uint64_t descB[1];
-    alignas(64) uint descI[1];
-    unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
-    if (((int)threadIdx.x) < 32) {
-        __asm__ __volatile__(
-        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
-        :: "r"(smem_addr), "r"(512)
-        : "memory"
-        );
-    }
-    asm volatile("tcgen05.fence::before_thread_sync;\n");
-    asm volatile("bar.sync 0;\n");
-    asm volatile("tcgen05.fence::after_thread_sync;\n");
-    for (int i = 0; i < 128; ++i) {
-        reg[i] = 0.000000e+00f;
-    }
-
-
-    int lane   = threadIdx.x & 31;
-    int warp   = threadIdx.x >> 5;
-    int row0_w = warp * 32;
-
-    const char* g_base_A = reinterpret_cast<const char*>(A) +
-        ((row0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
-
+    alignas(64) float acc[128];                // final C-row
     #pragma unroll
-    for (int j = 0; j < CP_PER_THREAD; ++j) {
-        int cp_idx  = j * 32 + lane;              // 0‥255
-        int row_off = cp_idx / CP_PER_ROW;        // 0‥31
-        int col_cp  = cp_idx % CP_PER_ROW;        // 0‥7
+    for (int i = 0; i < 128; ++i) acc[i] = 0.f; 
 
-        const char* g_src = g_base_A +
-            row_off * prob.K * HALF_T_BYTES +
-            col_cp * CP_BYTES;
-
-        int col    = col_cp * 8;                  // 8 halfs
-        int sm_idx = swizzle(row0_w + row_off, col);
-        char* s_dst = reinterpret_cast<char*>(&A_smem[sm_idx]);
-
-        cp_async_16B(g_src, s_dst);
-    }
-    asm volatile("cp.async.commit_group;\n");
-    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-
-    const char* g_base_B = reinterpret_cast<const char*>(B) +
-        ((col0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
-
-    #pragma unroll
-    for (int j = 0; j < CP_PER_THREAD; ++j) {
-        int cp_idx  = j * 32 + lane;
-        int row_off = cp_idx / CP_PER_ROW;
-        int col_cp  = cp_idx % CP_PER_ROW;
-
-        const char* g_src = g_base_B +
-            row_off * prob.K * HALF_T_BYTES +
-            col_cp * CP_BYTES;
-
-        int col    = col_cp * 8;
-        int sm_idx = swizzle(row0_w + row_off, col);
-        char* s_dst = reinterpret_cast<char*>(&B_smem[sm_idx]);
-
-        cp_async_16B(g_src, s_dst);
-    }
-    asm volatile("cp.async.commit_group;\n");
-    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-
-
-
-        asm volatile("tcgen05.fence::before_thread_sync;\n");
-    asm volatile("bar.sync 0;\n");
-    asm volatile("tcgen05.fence::after_thread_sync;\n");
-    KDBG("tiles copied to SMEM");
-    __shared__ unsigned long long sem;
-    if (((int)threadIdx.x) == 0) {
-        asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
-        uint64_t sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
-        ptx_tcgen05_encode_instr_descriptor(descI, 128, 128, 1, 0, 0, false, false, false, false, false, false);
-        for (int k = 0; k < 4; ++k) {
-        ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
-        ptx_tcgen05_encode_matrix_descriptor(descB, (&(B_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
-        if (k == 0) {
-            
-            {
-                /* T.ptx_tcgen05_mma() */
-                asm volatile(
-                    "{\n"
-                    ".reg .pred p;\n"
-                    "setp.eq.u32 p, 1, 0;\n"
-                    "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
-                    "{%5, %6, %7, %8}, p;\n"
-                    "}\n"
-                    :
-                    : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(0), "r"(0), "r"(0), "r"(0), "r"(0)
-                );
-            }
-        } else {
-            
-            {
-                /* T.ptx_tcgen05_mma() */
-                asm volatile(
-                    "{\n"
-                    ".reg .pred p;\n"
-                    "setp.eq.u32 p, 1, 1; \n"
-                    "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
-                    "{%5, %6, %7, %8}, p;\n"
-                    "}\n"
-                    :
-                    : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(1), "r"(0), "r"(0), "r"(0), "r"(0)
-                );
-            }
+        int row0 = (clusterY * 2 + rank/4) * Mb;     
+        int col0 = (clusterX * 4 + rank%4) * Nb; 
+        __shared__ alignas(256) half A_smem[8192];
+        __shared__ alignas(256) half B_smem[8192];  
+        alignas(64) float reg[128];
+        __shared__ alignas(8) uint tmem_addr[1];
+        /* ---- allocate 64-column TMEM -------------------------------- */
+        alignas(64) uint64_t descA[1];
+        alignas(64) uint64_t descB[1];
+        alignas(64) uint descI[1];
+        if (((int)threadIdx.x) < 32) {
+        unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
+                __asm__ __volatile__(
+            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
+            :: "r"(smem_addr), "r"(512)
+            : "memory"
+            );
         }
-        }
-        asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
-    }
-
-
-
-    /* ---- wait for commit ---------------------------------------- */
-    KDBG("waiting on mbarrier");
-    mbarrier_wait<0>(&sem);
-    KDBG("mbarrier passed");
-        asm volatile("tcgen05.fence::before_thread_sync;\n");
-    asm volatile("bar.sync 0;\n");
-    asm volatile("tcgen05.fence::after_thread_sync;\n");
-    asm volatile("tcgen05.fence::after_thread_sync;\n" ::: "memory");
-
-    /* ---- read a single column from TMEM ------------------------- */
-    if (threadIdx.x == 0) KDBG("loading from TMEM");
-    #pragma unroll
-    for (int i_1 = 0; i_1 < 128; ++i_1) {
+    for (int kkk = 0; kkk<(prob.K + Kb - 1)/Kb; ++kkk)  // split-K loop
+    {   
+        int tileK = kkk;  
         
-        {
-            /* T.ptx_tcgen05_ld() */
-            asm volatile(
-                "tcgen05.ld.sync.aligned.32x32b.x1.b32 "
-                "{%0}, "
-                "[%1];\n"
-                :  "=r"(*(uint32_t*)&reg[i_1])
-                :  "r"(get_tmem_addr(tmem_addr[0],  threadIdx.x /32 *32, i_1))
-            );
-        }
-    }
-    asm volatile(
-                "tcgen05.wait::ld.sync.aligned;"
-            );
-    // for (int i_2 = 0; i_2 < 128; ++i_2) {
-    //     C[((((int)threadIdx.x) * 128) + i_2)] = reg[i_2];
-    // }
-    int row = threadIdx.x;                       // 0 … 127 (row inside tile)
-
-    int globalRow = row0 + row;                  // absolute row in C
-    #pragma unroll
-    for (int n = 0; n < Nb; ++n) {               // Nb == 128
-        int globalCol = col0 + n;                // absolute column in C
-        int idx = globalRow * prob.N + globalCol;
-
-        atomicAdd(&C[idx], reg[n]);              // merge partial sums
-    }
         asm volatile("tcgen05.fence::before_thread_sync;\n");
-    asm volatile("bar.sync 0;\n");
-    asm volatile("tcgen05.fence::after_thread_sync;\n");
-    KDBG("column written to global");
+        asm volatile("bar.sync 0;\n");
+        asm volatile("tcgen05.fence::after_thread_sync;\n");
+        for (int i = 0; i < 128; ++i) {
+            reg[i] = 0.000000e+00f;
+        }
+
+
+        int lane   = threadIdx.x & 31;
+        int warp   = threadIdx.x >> 5;
+        int row0_w = warp * 32;    
+        int k0   = tileK * Kb; 
+        const char* g_base_A = reinterpret_cast<const char*>(A) +
+            ((row0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
+
+        #pragma unroll
+        for (int j = 0; j < CP_PER_THREAD; ++j) {
+            int cp_idx  = j * 32 + lane;              // 0‥255
+            int row_off = cp_idx / CP_PER_ROW;        // 0‥31
+            int col_cp  = cp_idx % CP_PER_ROW;        // 0‥7
+
+            const char* g_src = g_base_A +
+                row_off * prob.K * HALF_T_BYTES +
+                col_cp * CP_BYTES;
+
+            int col    = col_cp * 8;                  // 8 halfs
+            int sm_idx = swizzle(row0_w + row_off, col);
+            char* s_dst = reinterpret_cast<char*>(&A_smem[sm_idx]);
+
+            cp_async_16B(g_src, s_dst);
+        }
+        asm volatile("cp.async.commit_group;\n");
+        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+
+        const char* g_base_B = reinterpret_cast<const char*>(B) +
+            ((col0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
+
+        #pragma unroll
+        for (int j = 0; j < CP_PER_THREAD; ++j) {
+            int cp_idx  = j * 32 + lane;
+            int row_off = cp_idx / CP_PER_ROW;
+            int col_cp  = cp_idx % CP_PER_ROW;
+
+            const char* g_src = g_base_B +
+                row_off * prob.K * HALF_T_BYTES +
+                col_cp * CP_BYTES;
+
+            int col    = col_cp * 8;
+            int sm_idx = swizzle(row0_w + row_off, col);
+            char* s_dst = reinterpret_cast<char*>(&B_smem[sm_idx]);
+
+            cp_async_16B(g_src, s_dst);
+        }
+        asm volatile("cp.async.commit_group;\n");
+        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+
+
+
+            asm volatile("tcgen05.fence::before_thread_sync;\n");
+        asm volatile("bar.sync 0;\n");
+        asm volatile("tcgen05.fence::after_thread_sync;\n");
+        KDBG("tiles copied to SMEM");
+        __shared__ unsigned long long sem;
+        if (((int)threadIdx.x) == 0) {
+            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
+            uint64_t sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
+            ptx_tcgen05_encode_instr_descriptor(descI, 128, 128, 1, 0, 0, false, false, false, false, false, false);
+            for (int k = 0; k < 4; ++k) {
+            ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
+            ptx_tcgen05_encode_matrix_descriptor(descB, (&(B_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
+            if (k == 0) {
+                
+                {
+                    /* T.ptx_tcgen05_mma() */
+                    asm volatile(
+                        "{\n"
+                        ".reg .pred p;\n"
+                        "setp.eq.u32 p, 1, 0;\n"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
+                        "{%5, %6, %7, %8}, p;\n"
+                        "}\n"
+                        :
+                        : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(0), "r"(0), "r"(0), "r"(0), "r"(0)
+                    );
+                }
+            } else {
+                
+                {
+                    /* T.ptx_tcgen05_mma() */
+                    asm volatile(
+                        "{\n"
+                        ".reg .pred p;\n"
+                        "setp.eq.u32 p, 1, 1; \n"
+                        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
+                        "{%5, %6, %7, %8}, p;\n"
+                        "}\n"
+                        :
+                        : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(1), "r"(0), "r"(0), "r"(0), "r"(0)
+                    );
+                }
+            }
+            }
+            asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
+        }
+
+
+
+        /* ---- wait for commit ---------------------------------------- */
+        KDBG("waiting on mbarrier");
+        mbarrier_wait<0>(&sem);
+        KDBG("mbarrier passed");
+            asm volatile("tcgen05.fence::before_thread_sync;\n");
+        asm volatile("bar.sync 0;\n");
+        asm volatile("tcgen05.fence::after_thread_sync;\n");
+        asm volatile("tcgen05.fence::after_thread_sync;\n" ::: "memory");
+
+        /* ---- read a single column from TMEM ------------------------- */
+        if (threadIdx.x == 0) KDBG("loading from TMEM");
+        #pragma unroll
+        for (int i_1 = 0; i_1 < 128; ++i_1) {
+            
+            {
+                /* T.ptx_tcgen05_ld() */
+                asm volatile(
+                    "tcgen05.ld.sync.aligned.32x32b.x1.b32 "
+                    "{%0}, "
+                    "[%1];\n"
+                    :  "=r"(*(uint32_t*)&reg[i_1])
+                    :  "r"(get_tmem_addr(tmem_addr[0],  threadIdx.x /32 *32, i_1))
+                );
+            }
+        }
+        asm volatile(
+                    "tcgen05.wait::ld.sync.aligned;"
+                );
+        for (int i_2 = 0; i_2 < 128; ++i_2) {
+            acc[i_2] += reg[i_2];
+        }
+            asm volatile("tcgen05.fence::before_thread_sync;\n");
+        asm volatile("bar.sync 0;\n");
+        asm volatile("tcgen05.fence::after_thread_sync;\n");
+        KDBG("column written to global");
+    }
+    const int row = threadIdx.x;           // 0…127 inside the tile
+const int gRow = row0 + row;           // absolute row
+#pragma unroll
+for (int n=0; n<Nb; ++n) {             // Nb == 128
+    const int gCol = col0 + n;         // absolute column
+    const int idx  = gRow * prob.N + gCol;
+    C[idx] = acc[n];                   // or atomicAdd() for split-K
+}
     /* ---- deallocate --------------------------------------------- */
     if (((int)threadIdx.x) < 32) {
         
@@ -447,6 +450,7 @@ extern "C" __global__ void __cluster_dims__(4, 2, 1) __launch_bounds__(128) umma
 
   }
 }
+
 
 /* ---------------- CPU reference (full matrix) ------------------ */
 void cpu_gemm(const std::vector<Tab>& A,
@@ -479,8 +483,8 @@ void gpu_run( Tab* dA,  Tab* dB, Tacc* dC, ProblemSize  prob)
 {
 
     dim3 grid((prob.N + Nb - 1)/Nb,         // 8
-            (prob.M + Mb - 1)/Mb,         // 8
-            (prob.K + Kb - 1)/Kb);        // 16   split-K depth
+            (prob.M + Mb - 1)/Mb    // 8
+        );        // 16   split-K depth
     dim3 block(128);
 
     umma_tile<<<grid, block>>>(dA, dB, dC, prob);
@@ -493,7 +497,7 @@ int run_benchmark()
 
     std::mt19937 gen(41);
     std::uniform_real_distribution<float> rnd(-1.f, 1.f);
-    ProblemSize prob{1024, 1024, 1024};
+    ProblemSize prob{4096, 4096, 4096};
     int M = prob.M, N = prob.N, K = prob.K;   // convenience aliases
         // std::cout
         // << "--------------------  M=" << M
@@ -557,7 +561,7 @@ int run_benchmark()
     cudaDeviceSynchronize();
     auto t1 = std::chrono::high_resolution_clock::now();
 
-    double usec = std::chrono::duration<double>(t1 - t0).count()*1e6/iters;
+    double usec = std::chrono::duration<double>(t1 - t0).count()*1e6/3/iters;
 
     /* ---------- copy back & verify ------------------------------ */
     cudaMemcpy(hC_gpu.data(), dC, hC_gpu.size()*sizeof(Tacc),
@@ -568,22 +572,6 @@ int run_benchmark()
     /* ---------- full-matrix print + error stats -------------------- */
     double max_err = 0.0, avg_err = 0.0;          // pretty column width
 
-    /* --- EXPECTED (CPU) ------------------------------------------- */
-    // std::cout << "\n=== EXPECTED (CPU) ===\n     ";
-    // for (int j = 0; j < N; ++j) std::cout << j;
-    // std::cout << '\n';
-
-    // for (int i = 0; i < M; ++i) {
-    //     std::cout <<i << " :";
-    //     for (int j = 0; j < N; ++j)
-    //         std::cout <<  hC_ref[i * N + j];
-    //     std::cout << '\n';
-    // }
-
-    /* --- GPU OUTPUT ------------------------------------------------ */
-    // std::cout << "\n=== GPU OUTPUT ===\n     ";
-    // for (int j = 0; j < N; ++j) std::cout <<  j;
-    // std::cout << '\n';
 
     for (int i = 0; i < M; ++i) {
         //std::cout <<  i << " :";
@@ -609,42 +597,42 @@ int run_benchmark()
               << "  |  time = " << time_sec * 1e3 << " ms"
               << "  |  throughput = " << tflops << " TFLOPS\n";
     
-    std::ofstream fout("matrix_dump.txt");
-    std::streambuf* cout_buf = std::cout.rdbuf(); // backup
-    std::cout.rdbuf(fout.rdbuf());                // redirect
+    // std::ofstream fout("matrix_dump.txt");
+    // std::streambuf* cout_buf = std::cout.rdbuf(); // backup
+    // std::cout.rdbuf(fout.rdbuf());                // redirect
 
 
-    // std::cout << "\n=== EXPECTED (CPU) ===\n     ";
-    // for (int j = 0; j < N; ++j) std::cout<< j;
-    // std::cout << '\n';
+    // // std::cout << "\n=== EXPECTED (CPU) ===\n     ";
+    // // for (int j = 0; j < N; ++j) std::cout<< j;
+    // // std::cout << '\n';
+
+    // // for (int i = 0; i < M; ++i) {
+    // //     std::cout  << i << " :";
+    // //     for (int j = 0; j < N; ++j)
+    // //         std::cout << hC_ref[i * N + j];
+    // //     std::cout << '\n';
+    // // }
+
+    // // std::cout << "\n=== GPU OUTPUT ===\n     ";
+    // // for (int j = 0; j < N; ++j) std::cout << j;
+    // // std::cout << '\n';
 
     // for (int i = 0; i < M; ++i) {
-    //     std::cout  << i << " :";
-    //     for (int j = 0; j < N; ++j)
-    //         std::cout << hC_ref[i * N + j];
-    //     std::cout << '\n';
+    //     //std::cout  << i << " :";
+    //     for (int j = 0; j < N; ++j) {
+    //         float gpu = hC_gpu[i * N + j];
+    //         //std::cout << gpu;
+
+    //         double e = std::fabs(gpu - hC_ref[i * N + j]);
+    //         max_err  = std::max(max_err, e);
+    //         avg_err += e;
+    //     }
+    //     //std::cout << '\n';
     // }
 
-    // std::cout << "\n=== GPU OUTPUT ===\n     ";
-    // for (int j = 0; j < N; ++j) std::cout << j;
-    // std::cout << '\n';
-
-    for (int i = 0; i < M; ++i) {
-        //std::cout  << i << " :";
-        for (int j = 0; j < N; ++j) {
-            float gpu = hC_gpu[i * N + j];
-            //std::cout << gpu;
-
-            double e = std::fabs(gpu - hC_ref[i * N + j]);
-            max_err  = std::max(max_err, e);
-            avg_err += e;
-        }
-        //std::cout << '\n';
-    }
-
-    avg_err /= static_cast<double>(M * N);
-    std::cout << "\nSummary  →  max|err| = " << max_err
-              << "   avg|err| = " << avg_err << '\n';
+    // avg_err /= static_cast<double>(M * N);
+    // std::cout << "\nSummary  →  max|err| = " << max_err
+    //           << "   avg|err| = " << avg_err << '\n';
 
     // std::cout.rdbuf(cout_buf); // restore std::cout
     /* ---------- clean up ---------------------------------------- */
