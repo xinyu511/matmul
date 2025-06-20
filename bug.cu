@@ -12,7 +12,24 @@
 #include <omp.h>
 #include <fstream>
 
+__device__ __forceinline__
+void cp_async_16B_mc(const void* gmem, const void* smem,
+                     const void* mbar, uint16_t mask)
+{
+    uint32_t smem32 = __cvta_generic_to_shared(smem);
+    uint64_t gptr   = reinterpret_cast<const uint64_t>(gmem);
+    uint32_t mbar32 = __cvta_generic_to_shared(mbar);
 
+    asm volatile(
+      "cp.async.bulk.shared::cluster.global."
+      "mbarrier::complete_tx::bytes.multicast::cluster "
+      " [%0], [%1], [%2], %3;\n"
+      :: "r"(smem32),        // dstMem  (shared)
+         "l"(gptr),          // srcMem  (global)
+         "r"(mbar32),        // mbar
+         "h"(mask)           // ctaMask
+      : "memory");
+}
 
 __device__ static inline int3 clusterIdx() {
     int3 cluster_idx;
@@ -67,7 +84,7 @@ __device__ __forceinline__ void cp_async_16B(const void* gmem_src,
 
     // • Global pointer stays 64-bit; constraint "l" or "r" both work.
     asm volatile(
-        "cp.async.cg.shared.global [%0], [%1], 16;\n"
+        "cp.async.cg.shared.global.L2::128B [%0], [%1], 16;\n"
         :: "r"(smem_u32),          // 32-bit SHARED addr   (dst)
            "l"(gmem_src)           // 64-bit GENERIC addr  (src)
         : "memory");
@@ -239,18 +256,18 @@ __device__ inline void mbarrier_wait(void* bar_b64)
     );
 }
 
-extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
-extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
+extern "C" __global__ void __cluster_dims__(4, 2, 1) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
+extern "C" __global__ void __cluster_dims__(4, 2, 1) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
     KDBG("kernel entry");
     int clusterX   = clusterIdx().x;   
+    int clusterY   = clusterIdx().y;   
     int rank       = cluster_ctarank(); 
   
     int tileK = blockIdx.z;      
-    int k0   = tileK * Kb;
-    int tileM      = blockIdx.y;          
+    int k0   = tileK * Kb;    
 
-    int row0 = tileM * Mb;      
-    int col0 = (clusterX * 2 + rank) * Nb; 
+    int row0 = (clusterY * 2 + rank/4) * Mb;     
+    int col0 = (clusterX * 4 + rank%4) * Nb; 
     __shared__ alignas(256) half A_smem[8192];
     __shared__ alignas(256) half B_smem[8192];  
     alignas(64) float reg[128];
