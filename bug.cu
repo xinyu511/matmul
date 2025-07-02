@@ -1,4 +1,5 @@
 // nvcc matmul_tmem.cu -std=c++20 -O3 -arch=sm_100a -Xcompiler -fopenmp -o matmul_tmem [-DDEBUG_UMMA]
+// todo: 2 cta first, mbarrier get from another cta use mapa
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -11,25 +12,6 @@
 #include <iostream>
 #include <omp.h>
 #include <fstream>
-
-__device__ __forceinline__
-void cp_async_16B_mc(const void* gmem, const void* smem,
-                     const void* mbar, uint16_t mask)
-{
-    uint32_t smem32 = __cvta_generic_to_shared(smem);
-    uint64_t gptr   = reinterpret_cast<const uint64_t>(gmem);
-    uint32_t mbar32 = __cvta_generic_to_shared(mbar);
-
-    asm volatile(
-      "cp.async.bulk.shared::cluster.global."
-      "mbarrier::complete_tx::bytes.multicast::cluster "
-      " [%0], [%1], [%2], %3;\n"
-      :: "r"(smem32),        // dstMem  (shared)
-         "l"(gptr),          // srcMem  (global)
-         "r"(mbar32),        // mbar
-         "h"(mask)           // ctaMask
-      : "memory");
-}
 
 __device__ static inline int3 clusterIdx() {
     int3 cluster_idx;
@@ -256,8 +238,8 @@ __device__ inline void mbarrier_wait(void* bar_b64)
     );
 }
 
-extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
-extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
+extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
+extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
     KDBG("kernel entry");
     int clusterX   = clusterIdx().x;   
     int clusterY   = clusterIdx().y;   
@@ -266,8 +248,8 @@ extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_ti
     #pragma unroll
     for (int i = 0; i < 128; ++i) acc[i] = 0.f; 
 
-        int row0 = (clusterY * 2 + rank/4) * Mb;     
-        int col0 = (clusterX * 4 + rank%4) * Nb; 
+        int row0 = (clusterX * 2 + rank%2) * Mb;     
+        int col0 = clusterY * Nb; 
         __shared__ alignas(256) half A_smem[8192];
         __shared__ alignas(256) half B_smem[8192];  
         alignas(64) float reg[128];
@@ -277,12 +259,18 @@ extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_ti
         alignas(64) uint64_t descB[1];
         alignas(64) uint descI[1];
         if (((int)threadIdx.x) < 32) {
-        unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
-                __asm__ __volatile__(
-            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
-            :: "r"(smem_addr), "r"(512)
-            : "memory"
-            );
+            unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
+            __asm__ __volatile__(
+                "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
+                :: "r"(smem_addr), "r"(512)
+                : "memory"
+                );
+        }
+        __shared__ unsigned long long sem;
+        uint64_t sem_addr;
+        if (((int)threadIdx.x) == 0) {
+            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
+            sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
         }
     for (int kkk = 0; kkk<(prob.K + Kb - 1)/Kb; ++kkk)  // split-K loop
     {   
@@ -344,22 +332,22 @@ extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_ti
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n" ::: "memory");
 
-
-
-            asm volatile("tcgen05.fence::before_thread_sync;\n");
+        if (((int)threadIdx.x) == 0) {
+            asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
+        }
+        mbarrier_wait<0>(&sem);
+        asm volatile("tcgen05.fence::before_thread_sync;\n");
         asm volatile("bar.sync 0;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n");
+
         KDBG("tiles copied to SMEM");
-        __shared__ unsigned long long sem;
         if (((int)threadIdx.x) == 0) {
-            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
-            uint64_t sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
             ptx_tcgen05_encode_instr_descriptor(descI, 128, 128, 1, 0, 0, false, false, false, false, false, false);
             for (int k = 0; k < 4; ++k) {
             ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
             ptx_tcgen05_encode_matrix_descriptor(descB, (&(B_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
             if (k == 0) {
-                
+                //todo goto 256*256
                 {
                     /* T.ptx_tcgen05_mma() */
                     asm volatile(
@@ -390,6 +378,7 @@ extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_ti
                 }
             }
             }
+            //todo :group 2
             asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
         }
 
@@ -397,9 +386,9 @@ extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_ti
 
         /* ---- wait for commit ---------------------------------------- */
         KDBG("waiting on mbarrier");
-        mbarrier_wait<0>(&sem);
+        mbarrier_wait<1>(&sem);
         KDBG("mbarrier passed");
-            asm volatile("tcgen05.fence::before_thread_sync;\n");
+        asm volatile("tcgen05.fence::before_thread_sync;\n");
         asm volatile("bar.sync 0;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n" ::: "memory");
@@ -433,21 +422,23 @@ extern "C" __global__ void __cluster_dims__(4, 2) __launch_bounds__(128) umma_ti
     }
     const int row = threadIdx.x;           // 0…127 inside the tile
 const int gRow = row0 + row;           // absolute row
+//todo add offset
 #pragma unroll
 for (int n=0; n<Nb; ++n) {             // Nb == 128
     const int gCol = col0 + n;         // absolute column
     const int idx  = gRow * prob.N + gCol;
     C[idx] = acc[n];                   // or atomicAdd() for split-K
 }
+    __syncthreads();
     /* ---- deallocate --------------------------------------------- */
     if (((int)threadIdx.x) < 32) {
-        
+    
+    // deallocate 512 bytes of TMEM    
         __asm__ __volatile__(
       "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
       :: "r"(tmem_addr[0]), "r"(512)
       : "memory"
     );
-
   }
 }
 
@@ -597,45 +588,6 @@ int run_benchmark()
               << "  |  time = " << time_sec * 1e3 << " ms"
               << "  |  throughput = " << tflops << " TFLOPS\n";
     
-    // std::ofstream fout("matrix_dump.txt");
-    // std::streambuf* cout_buf = std::cout.rdbuf(); // backup
-    // std::cout.rdbuf(fout.rdbuf());                // redirect
-
-
-    // // std::cout << "\n=== EXPECTED (CPU) ===\n     ";
-    // // for (int j = 0; j < N; ++j) std::cout<< j;
-    // // std::cout << '\n';
-
-    // // for (int i = 0; i < M; ++i) {
-    // //     std::cout  << i << " :";
-    // //     for (int j = 0; j < N; ++j)
-    // //         std::cout << hC_ref[i * N + j];
-    // //     std::cout << '\n';
-    // // }
-
-    // // std::cout << "\n=== GPU OUTPUT ===\n     ";
-    // // for (int j = 0; j < N; ++j) std::cout << j;
-    // // std::cout << '\n';
-
-    // for (int i = 0; i < M; ++i) {
-    //     //std::cout  << i << " :";
-    //     for (int j = 0; j < N; ++j) {
-    //         float gpu = hC_gpu[i * N + j];
-    //         //std::cout << gpu;
-
-    //         double e = std::fabs(gpu - hC_ref[i * N + j]);
-    //         max_err  = std::max(max_err, e);
-    //         avg_err += e;
-    //     }
-    //     //std::cout << '\n';
-    // }
-
-    // avg_err /= static_cast<double>(M * N);
-    // std::cout << "\nSummary  →  max|err| = " << max_err
-    //           << "   avg|err| = " << avg_err << '\n';
-
-    // std::cout.rdbuf(cout_buf); // restore std::cout
-    /* ---------- clean up ---------------------------------------- */
     cudaFree(dA); cudaFree(dB); cudaFree(dC);
     return 0;
 
