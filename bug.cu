@@ -1,5 +1,5 @@
 // nvcc matmul.cu -std=c++20 -O3 -arch=sm_100a -Xcompiler -fopenmp -o matmul [-DDEBUG_UMMA]
-// todo: 2 cta first, mbarrier get from another cta use mapa
+
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -12,6 +12,11 @@
 #include <iostream>
 #include <omp.h>
 #include <fstream>
+
+// ─── Pipeline Constants ──────────────────────────────────────────────────────
+constexpr int kPipelineDepth = 2;
+constexpr int kNumConsumers = 2;
+constexpr int kNumProducers = 1; // The producer group has multiple roles inside
 
 __device__ static inline int3 clusterIdx() {
     int3 cluster_idx;
@@ -52,7 +57,7 @@ constexpr int CP_BYTES = BYTES_PER_CP;
 static_assert(BYTES_PER_TILE % BYTES_PER_CP == 0, "tile must be 16-byte aligned");
 
 // Each thread in a 32-thread warp handles 16×8 = 128 B  (8 half4’s)
-constexpr int CP_PER_THREAD = CP_PER_TILE / 128; 
+constexpr int CP_PER_THREAD = CP_PER_TILE / 128;
 
 
 
@@ -207,8 +212,8 @@ __forceinline__ __device__ uint32_t get_tmem_addr(uint32_t idx, int row_offset, 
 
 __device__ __forceinline__ uint32_t matrix_encode(uint32_t x) { return x>> 4; }
 
-__device__ inline uint64_t make_st_desc(const Tab* smem) { 
-    SmemDescriptor desc; 
+__device__ inline uint64_t make_st_desc(const Tab* smem) {
+    SmemDescriptor desc;
     desc.start_address_ = matrix_encode(static_cast<uint32_t>(__cvta_generic_to_shared(smem)));
     desc.leading_byte_offset_ = 1;
     desc.stride_byte_offset_ = 64;
@@ -219,11 +224,19 @@ __device__ inline uint64_t make_st_desc(const Tab* smem) {
     return desc;
 }
 
-//copied from thunderkittens
-template<int phaseBit>
-__device__ inline void mbarrier_wait(void* bar_b64)
+// ─── Semaphore (mbarrier) Helpers ────────────────────────────────────────────
+__device__ inline void init_barrier(uint64_t* barrier, int thread_count) {
+    asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "l"(barrier), "r"(thread_count));
+}
+
+__device__ inline void barrier_arrive(uint64_t* barrier) {
+    uint64_t addr = __cvta_generic_to_shared(barrier);
+    asm volatile("mbarrier.arrive.shared::cta.b64 [%0], 1;" :: "l"(addr));
+}
+
+__device__ inline void barrier_wait(uint64_t* barrier, int phase)
 {
-    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(bar_b64));
+    uint32_t addr = static_cast<uint32_t>(__cvta_generic_to_shared(barrier));
     asm volatile (
         "{\n"
         ".reg .pred                P1;\n"
@@ -233,201 +246,157 @@ __device__ inline void mbarrier_wait(void* bar_b64)
         "bra.uni                   LAB_WAIT;\n"
         "DONE:\n"
         "}\n"
-        :: "r"(addr),
-        "r"(phaseBit)
+        :: "r"(addr), "r"(phase)
     );
 }
 
-extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob);
+
 extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(half* __restrict__ A, half* __restrict__ B, float* __restrict__ C, ProblemSize  prob) {
     KDBG("kernel entry");
-    int clusterX   = clusterIdx().x;   
-    int clusterY   = clusterIdx().y;   
-    int rank       = cluster_ctarank(); 
-    alignas(64) float acc[128];                // final C-row
-    #pragma unroll
-    for (int i = 0; i < 128; ++i) acc[i] = 0.f; 
+    int clusterX   = clusterIdx().x;
+    int clusterY   = clusterIdx().y;
+    int rank       = cluster_ctarank();
+    int lane   = threadIdx.x & 31;
+    int warp   = threadIdx.x >> 5;
 
-        int row0 = (clusterX * 2 + rank%2) * Mb;     
-        int col0 = clusterY * Nb; 
-        __shared__ alignas(256) half A_smem[8192];
-        __shared__ alignas(256) half B_smem[8192];  
-        alignas(64) float reg[128];
-        __shared__ alignas(8) uint tmem_addr[1];
-        /* ---- allocate 64-column TMEM -------------------------------- */
+    int row0 = (clusterX * 2 + rank%2) * Mb;
+    int col0 = clusterY * Nb;
+
+    // --- Shared Memory ---
+    // Double buffer for pipelining
+    __shared__ alignas(256) half A_smem[kPipelineDepth][8192];
+    __shared__ alignas(256) half B_smem[kPipelineDepth][8192];
+    __shared__ alignas(8) uint tmem_addr[1];
+
+    // --- Semaphores (mbarriers) ---
+    __shared__ uint64_t inputs_arrived[kPipelineDepth];
+    __shared__ uint64_t inputs_finished[kPipelineDepth];
+    __shared__ uint64_t outputs_arrived;
+    __shared__ uint64_t outputs_finished[kNumConsumers];
+
+
+    /* ---- allocate 64-column TMEM & Init Semaphores ------------------- */
+    if (threadIdx.x == 0) {
+        // Allocate TMEM
+        unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
+        __asm__ __volatile__(
+            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
+            :: "r"(smem_addr), "r"(512)
+            : "memory"
+            );
+
+        // Initialize semaphores for the pipeline
+        for (int i = 0; i < kPipelineDepth; ++i) {
+            init_barrier(&inputs_arrived[i], 1); // 1 loader
+            init_barrier(&inputs_finished[i], 1); // 1 mma launcher
+        }
+        init_barrier(&outputs_arrived, 1); // 1 mma launcher
+        for (int i = 0; i < kNumConsumers; ++i) {
+            init_barrier(&outputs_finished[i], 1); // 1 storer per consumer group
+        }
+    }
+    __syncthreads(); // Ensure TMEM and barriers are initialized
+
+    if ((warp/4) == 2) { // PRODUCER GROUP)
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" :: "n"(56));
         alignas(64) uint64_t descA[1];
         alignas(64) uint64_t descB[1];
         alignas(64) uint descI[1];
-        if (((int)threadIdx.x) < 32) {
-            unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
-            __asm__ __volatile__(
-                "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
-                :: "r"(smem_addr), "r"(512)
-                : "memory"
-                );
 
+        for (int kkk = 0; kkk<(prob.K + Kb - 1)/Kb; ++kkk)
+        {
+            int pipe_stage = kkk % kPipelineDepth;
+            int phase = (kkk / kPipelineDepth) % 2;
 
-        }
-    for (int kkk = 0; kkk<(prob.K + Kb - 1)/Kb; ++kkk)  // split-K loop
-    {   
-        int tileK = kkk;  
-        
-        asm volatile("tcgen05.fence::before_thread_sync;\n");
-        asm volatile("bar.sync 0;\n");
-        asm volatile("tcgen05.fence::after_thread_sync;\n");
-        for (int i = 0; i < 128; ++i) {
-            reg[i] = 0.000000e+00f;
-        }
+            if (warp%4 == 3) { // LOADER
+                barrier_wait(&inputs_finished[pipe_stage], phase);
+                int tileK = kkk;
+                int row0_w = 0;
+                int k0   = tileK * Kb;
 
-
-        int lane   = threadIdx.x & 31;
-        int warp   = threadIdx.x >> 5;
-        int row0_w = warp * 32;    
-        int k0   = tileK * Kb; 
-        const char* g_base_A = reinterpret_cast<const char*>(A) +
-            ((row0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
-
-        #pragma unroll
-        for (int j = 0; j < CP_PER_THREAD; ++j) {
-            int cp_idx  = j * 32 + lane;              // 0‥255
-            int row_off = cp_idx / CP_PER_ROW;        // 0‥31
-            int col_cp  = cp_idx % CP_PER_ROW;        // 0‥7
-
-            const char* g_src = g_base_A +
-                row_off * prob.K * HALF_T_BYTES +
-                col_cp * CP_BYTES;
-
-            int col    = col_cp * 8;                  // 8 halfs
-            int sm_idx = swizzle(row0_w + row_off, col);
-            char* s_dst = reinterpret_cast<char*>(&A_smem[sm_idx]);
-
-            cp_async_16B(g_src, s_dst);
-        }
-        asm volatile("cp.async.commit_group;\n");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-
-        const char* g_base_B = reinterpret_cast<const char*>(B) +
-            ((col0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
-
-        #pragma unroll
-        for (int j = 0; j < CP_PER_THREAD; ++j) {
-            int cp_idx  = j * 32 + lane;
-            int row_off = cp_idx / CP_PER_ROW;
-            int col_cp  = cp_idx % CP_PER_ROW;
-
-            const char* g_src = g_base_B +
-                row_off * prob.K * HALF_T_BYTES +
-                col_cp * CP_BYTES;
-
-            int col    = col_cp * 8;
-            int sm_idx = swizzle(row0_w + row_off, col);
-            char* s_dst = reinterpret_cast<char*>(&B_smem[sm_idx]);
-
-            cp_async_16B(g_src, s_dst);
-        }
-        asm volatile("cp.async.commit_group;\n");
-        asm volatile("cp.async.wait_group 0;\n" ::: "memory");
-
-
-
-        asm volatile("tcgen05.fence::before_thread_sync;\n");
-        asm volatile("bar.sync 0;\n");
-        asm volatile("tcgen05.fence::after_thread_sync;\n");
-        KDBG("tiles copied to SMEM");
-        __shared__ unsigned long long sem;
-        if (((int)threadIdx.x) == 0) {
-            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
-            uint64_t sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
-            ptx_tcgen05_encode_instr_descriptor(descI, 128, 128, 1, 0, 0, false, false, false, false, false, false);
-            for (int k = 0; k < 4; ++k) {
-            ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
-            ptx_tcgen05_encode_matrix_descriptor(descB, (&(B_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
-            if (k == 0) {
-                //todo goto 256*256
-                {
-                    /* T.ptx_tcgen05_mma() */
-                    asm volatile(
-                        "{\n"
-                        ".reg .pred p;\n"
-                        "setp.eq.u32 p, 1, 0;\n"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
-                        "{%5, %6, %7, %8}, p;\n"
-                        "}\n"
-                        :
-                        : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(0), "r"(0), "r"(0), "r"(0), "r"(0)
-                    );
+                const char* g_base_A = reinterpret_cast<const char*>(A) + ((row0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
+                #pragma unroll
+                for (int j = 0; j < CP_PER_THREAD * 4; ++j) {
+                    int cp_idx  = j * 32 + lane; int row_off = cp_idx / CP_PER_ROW; int col_cp  = cp_idx % CP_PER_ROW;
+                    const char* g_src = g_base_A + row_off * prob.K * HALF_T_BYTES + col_cp * CP_BYTES;
+                    int col = col_cp * 8; int sm_idx = swizzle(row0_w + row_off, col);
+                    char* s_dst = reinterpret_cast<char*>(&A_smem[pipe_stage][sm_idx]);
+                    cp_async_16B(g_src, s_dst);
                 }
-            } else {
-                
-                {
-                    /* T.ptx_tcgen05_mma() */
-                    asm volatile(
-                        "{\n"
-                        ".reg .pred p;\n"
-                        "setp.eq.u32 p, 1, 1; \n"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
-                        "{%5, %6, %7, %8}, p;\n"
-                        "}\n"
-                        :
-                        : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(1), "r"(0), "r"(0), "r"(0), "r"(0)
-                    );
+                asm volatile("cp.async.commit_group;\n");
+
+                const char* g_base_B = reinterpret_cast<const char*>(B) + ((col0 + row0_w) * prob.K + k0) * HALF_T_BYTES;
+                #pragma unroll
+                for (int j = 0; j < CP_PER_THREAD * 4; ++j) {
+                    int cp_idx  = j * 32 + lane; int row_off = cp_idx / CP_PER_ROW; int col_cp  = cp_idx % CP_PER_ROW;
+                    const char* g_src = g_base_B + row_off * prob.K * HALF_T_BYTES + col_cp * CP_BYTES;
+                    int col = col_cp * 8; int sm_idx = swizzle(row0_w + row_off, col);
+                    char* s_dst = reinterpret_cast<char*>(&B_smem[pipe_stage][sm_idx]);
+                    cp_async_16B(g_src, s_dst);
                 }
+                asm volatile("cp.async.commit_group;\n");
+
+                asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+                barrier_arrive(&inputs_arrived[pipe_stage]);
             }
+            else if (warp%4 == 1 || warp%4 == 2) { // MMA LAUNCHER
+                barrier_wait(&outputs_finished[0], phase); // Wait for both consumers to be ready
+                barrier_wait(&outputs_finished[1], phase);
+                barrier_wait(&inputs_arrived[pipe_stage], phase);
+
+                if (lane == 0) {
+                    uint64_t sem_addr = __cvta_generic_to_shared(&outputs_arrived);
+                    ptx_tcgen05_encode_instr_descriptor(descI, 128, 128, 1, 0, 0, false, false, false, false, false, false);
+                    for (int k = 0; k < 4; ++k) {
+                        ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[pipe_stage][(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
+                        ptx_tcgen05_encode_matrix_descriptor(descB, (&(B_smem[pipe_stage][(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
+                        asm volatile( "{\n" ".reg .pred p;\n" "setp.eq.u32 p, %4, 0;\n" "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, " "{%5, %6, %7, %8}, p;\n" "}\n" : : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(k==0?0:1), "r"(0), "r"(0), "r"(0), "r"(0));
+                    }
+                    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
+                }
+                barrier_arrive(&inputs_finished[pipe_stage]);
             }
-            //todo :group 2
-            asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
         }
 
-        /* ---- wait for commit ---------------------------------------- */
-        KDBG("waiting on mbarrier");
-        mbarrier_wait<0>(&sem);
-        KDBG("mbarrier passed");
-            asm volatile("tcgen05.fence::before_thread_sync;\n");
-        asm volatile("bar.sync 0;\n");
-        asm volatile("tcgen05.fence::after_thread_sync;\n");
-        asm volatile("tcgen05.fence::after_thread_sync;\n" ::: "memory");
-
-        /* ---- read a single column from TMEM ------------------------- */
-        if (threadIdx.x == 0) KDBG("loading from TMEM");
+    } else if (warp/4 < 2) { // CONSUMER/STORER GROUP (Warps 0, 1)
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" :: "n"(224));
+        alignas(64) float acc[128];
         #pragma unroll
-        for (int i_1 = 0; i_1 < 128; ++i_1) {
+        for (int i = 0; i < 128; ++i) acc[i] = 0.f;
+
+        for (int kkk = 0; kkk<(prob.K + Kb - 1)/Kb; ++kkk)
+        {
+            int phase = (kkk / kPipelineDepth) % 2;
+            barrier_wait(&outputs_arrived, phase);
             
-            {
-                /* T.ptx_tcgen05_ld() */
-                asm volatile(
-                    "tcgen05.ld.sync.aligned.32x32b.x1.b32 "
-                    "{%0}, "
-                    "[%1];\n"
-                    :  "=r"(*(uint32_t*)&reg[i_1])
-                    :  "r"(get_tmem_addr(tmem_addr[0],  threadIdx.x /32 *32, i_1))
-                );
+            // Load from TMEM to registers
+            #pragma unroll
+            for (int i_1 = 0; i_1 < 128; ++i_1) {
+                asm volatile( "tcgen05.ld.sync.aligned.32x32b.x1.b32 " "{%0}, " "[%1];\n" :  "=r"(*(uint32_t*)&acc[i_1]) :  "r"(get_tmem_addr(tmem_addr[0],  threadIdx.x /32 *32, i_1)) );
+            }
+            asm volatile("tcgen05.wait::ld.sync.aligned;");
+
+            // This is where the store to global memory would happen.
+            // For now, we just signal that we are done.
+            if(lane == 0) {
+                barrier_arrive(&outputs_finished[warp]);
             }
         }
-        asm volatile(
-                    "tcgen05.wait::ld.sync.aligned;"
-                );
-        for (int i_2 = 0; i_2 < 128; ++i_2) {
-            acc[i_2] += reg[i_2];
+        
+        // Final write to global memory
+        const int row = threadIdx.x;
+        const int gRow = row0 + row;
+        #pragma unroll
+        for (int n=0; n<Nb; ++n) {
+            const int gCol = col0 + n;
+            const int idx  = gRow * prob.N + gCol;
+            C[idx] = acc[n];
         }
-            asm volatile("tcgen05.fence::before_thread_sync;\n");
-        asm volatile("bar.sync 0;\n");
-        asm volatile("tcgen05.fence::after_thread_sync;\n");
-        KDBG("column written to global");
     }
-    const int row = threadIdx.x;           // 0…127 inside the tile
-const int gRow = row0 + row;           // absolute row
-//todo add offset
-#pragma unroll
-for (int n=0; n<Nb; ++n) {             // Nb == 128
-    const int gCol = col0 + n;         // absolute column
-    const int idx  = gRow * prob.N + gCol;
-    C[idx] = acc[n];                   // or atomicAdd() for split-K
-}
+
     __syncthreads();
     /* ---- deallocate --------------------------------------------- */
-    if (((int)threadIdx.x) < 32) {
-    
-    // deallocate 512 bytes of TMEM    
+    if (threadIdx.x == 0) {
         __asm__ __volatile__(
       "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
       :: "r"(tmem_addr[0]), "r"(512)
@@ -450,14 +419,14 @@ void cpu_gemm(const std::vector<Tab>& A,
         for (int j = 0; j < N; ++j) {
             float s = 0.f;
             for (int k = 0; k < K; ++k)
-                s += __half2float(A[i*K + k]) *   // ←  K, not Kb
+                s += __half2float(A[i*K + k]) * // ←  K, not Kb
                       __half2float(B[j*K + k]);   // ←  K, not Kb
             C[i*N + j] = s;                       // ←  N, not Nb
         }
     }
 }
 /* =================================================================
- *                       B E N C H M A R K   D R I V E R
+ * B E N C H M A R K   D R I V E R
  * =================================================================*/
 
 /* Forward declaration */
@@ -478,7 +447,7 @@ void gpu_run( Tab* dA,  Tab* dB, Tacc* dC, ProblemSize  prob)
 /* Benchmark harness (matches ThunderKittens “run_benchmark”) */
 int run_benchmark()
 {
-    
+
 
     std::mt19937 gen(41);
     std::uniform_real_distribution<float> rnd(-1.f, 1.f);
@@ -528,7 +497,7 @@ int run_benchmark()
     std::cout << "CPU reference done\n";
 
     /* ---------- device buffers ---------------------------------- */
-    
+
     // cudaCheckErrors();
     std::cout << "device buffer done\n";
 
@@ -541,7 +510,7 @@ int run_benchmark()
     auto t0 = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < iters; ++i) {
         cudaMemset(dC, 0, M * N * sizeof(float));
-        gpu_run(dA, dB, dC, prob); 
+        gpu_run(dA, dB, dC, prob);
     }
     cudaDeviceSynchronize();
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -581,7 +550,7 @@ int run_benchmark()
     std::cout << "Problem " << M << "x" << N << "x" << K
               << "  |  time = " << time_sec * 1e3 << " ms"
               << "  |  throughput = " << tflops << " TFLOPS\n";
-    
+
     cudaFree(dA); cudaFree(dB); cudaFree(dC);
     return 0;
 
