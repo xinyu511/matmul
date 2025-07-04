@@ -1,4 +1,4 @@
-// nvcc matmul_tmem.cu -std=c++20 -O3 -arch=sm_100a -Xcompiler -fopenmp -o matmul_tmem [-DDEBUG_UMMA]
+// nvcc matmul.cu -std=c++20 -O3 -arch=sm_100a -Xcompiler -fopenmp -o matmul [-DDEBUG_UMMA]
 // todo: 2 cta first, mbarrier get from another cta use mapa
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -265,12 +265,8 @@ extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(
                 :: "r"(smem_addr), "r"(512)
                 : "memory"
                 );
-        }
-        __shared__ unsigned long long sem;
-        uint64_t sem_addr;
-        if (((int)threadIdx.x) == 0) {
-            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
-            sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
+
+
         }
     for (int kkk = 0; kkk<(prob.K + Kb - 1)/Kb; ++kkk)  // split-K loop
     {   
@@ -332,16 +328,16 @@ extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n" ::: "memory");
 
-        if (((int)threadIdx.x) == 0) {
-            asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
-        }
-        mbarrier_wait<0>(&sem);
+
+
         asm volatile("tcgen05.fence::before_thread_sync;\n");
         asm volatile("bar.sync 0;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n");
-
         KDBG("tiles copied to SMEM");
+        __shared__ unsigned long long sem;
         if (((int)threadIdx.x) == 0) {
+            asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
+            uint64_t sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
             ptx_tcgen05_encode_instr_descriptor(descI, 128, 128, 1, 0, 0, false, false, false, false, false, false);
             for (int k = 0; k < 4; ++k) {
             ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
@@ -382,13 +378,11 @@ extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(
             asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
         }
 
-
-
         /* ---- wait for commit ---------------------------------------- */
         KDBG("waiting on mbarrier");
-        mbarrier_wait<1>(&sem);
+        mbarrier_wait<0>(&sem);
         KDBG("mbarrier passed");
-        asm volatile("tcgen05.fence::before_thread_sync;\n");
+            asm volatile("tcgen05.fence::before_thread_sync;\n");
         asm volatile("bar.sync 0;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n" ::: "memory");
