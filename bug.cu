@@ -1,4 +1,4 @@
-// nvcc matmul_tmem.cu -std=c++20 -O3 -arch=sm_100a -Xcompiler -fopenmp -o matmul_tmem [-DDEBUG_UMMA]
+// nvcc bug.cu -std=c++20 -O3 -arch=sm_100a -Xcompiler -fopenmp -o bug [-DDEBUG_UMMA]
 // todo: 2 cta first, mbarrier get from another cta use mapa
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -12,6 +12,17 @@
 #include <iostream>
 #include <omp.h>
 #include <fstream>
+
+#ifdef DEBUG_UMMA
+#   define KDBG(fmt, ...)                                                        \
+        do {                                                                     \
+            if (blockIdx.x == 0 && threadIdx.x == 0)                              \
+                printf("[blk0] " fmt "\n", ##__VA_ARGS__);                       \
+        } while (0)
+#else
+#   define KDBG(fmt, ...)  ((void)0)
+#endif
+
 
 __device__ static inline int3 clusterIdx() {
     int3 cluster_idx;
@@ -55,14 +66,47 @@ static_assert(BYTES_PER_TILE % BYTES_PER_CP == 0, "tile must be 16-byte aligned"
 constexpr int CP_PER_THREAD = CP_PER_TILE / 128; 
 
 
+__device__ static inline void cluster_load_async(const void* tma_ptr, const void* smem_dst, __shared__ unsigned long long bar, uint16_t rank)
+{
+    if (((int)threadIdx.x) == 0 ) {
+        uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&bar));
+        uint32_t dst_ptr  = static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst));
+        //todo what is coordinate?
+        if(rank == 1) {
+            uint32_t neighbor_mbar_ptr;
+            asm volatile (
+                "mapa.shared::cluster.u32  %0, %1, %2;\n"
+                : "=r"(neighbor_mbar_ptr)
+                : "r"(mbar_ptr), "r"(0)
+            );
+            asm volatile (
+                "cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.cta_group::2.multicast::cluster"
+                " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
+                :
+                : "r"(dst_ptr), "l"(tma_ptr), "r"(neighbor_mbar_ptr),
+                "n"(0), "r"(0), "r"(0), "r"(0), "r"(0), "h"((uint16_t)(1<<rank))
+                : "memory"
+            );
+        } else {
+            asm volatile (
+                "cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::complete_tx::bytes.cta_group::2.multicast::cluster"
+                " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
+                :
+                : "r"(dst_ptr), "l"(tma_ptr), "r"(mbar_ptr),
+                "n"(0), "r"(0), "r"(0), "r"(0), "r"(0), "h"((uint16_t)(1<<rank))
+                : "memory"
+            );
+        }
+    }
+}
 
 // ---- 16-byte async copy from global to shared -------------------
-__device__ __forceinline__ void cp_async_16B(const void* gmem_src,
+__device__ __forceinline__ void load_async(const void* gmem_src,
                                             const void* smem_dst)
 {
     // • Convert *shared* pointer to 32-bit address space
     uint32_t smem_u32 =
-        static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst));
+    static_cast<uint32_t>(__cvta_generic_to_shared(smem_dst));
 
     // • Global pointer stays 64-bit; constraint "l" or "r" both work.
     asm volatile(
@@ -71,17 +115,6 @@ __device__ __forceinline__ void cp_async_16B(const void* gmem_src,
            "l"(gmem_src)           // 64-bit GENERIC addr  (src)
         : "memory");
 }
-
-
-#ifdef DEBUG_UMMA
-#   define KDBG(fmt, ...)                                                        \
-        do {                                                                     \
-            if (blockIdx.x == 0 && threadIdx.x == 0)                              \
-                printf("[blk0] " fmt "\n", ##__VA_ARGS__);                       \
-        } while (0)
-#else
-#   define KDBG(fmt, ...)  ((void)0)
-#endif
 
 union InstrDescriptor
 {
@@ -248,30 +281,45 @@ extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(
     #pragma unroll
     for (int i = 0; i < 128; ++i) acc[i] = 0.f; 
 
-        int row0 = (clusterX * 2 + rank%2) * Mb;     
-        int col0 = clusterY * Nb; 
-        __shared__ alignas(256) half A_smem[8192];
-        __shared__ alignas(256) half B_smem[8192];  
-        alignas(64) float reg[128];
-        __shared__ alignas(8) uint tmem_addr[1];
-        /* ---- allocate 64-column TMEM -------------------------------- */
-        alignas(64) uint64_t descA[1];
-        alignas(64) uint64_t descB[1];
-        alignas(64) uint descI[1];
-        if (((int)threadIdx.x) < 32) {
-            unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
-            __asm__ __volatile__(
-                "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;"
-                :: "r"(smem_addr), "r"(512)
-                : "memory"
-                );
-        }
-        __shared__ unsigned long long sem;
-        uint64_t sem_addr;
-        if (((int)threadIdx.x) == 0) {
+    int row0 = clusterY  * Mb;     
+    int col0 = (clusterX* 2 + rank%2) * Nb; 
+    __shared__ alignas(256) half A_smem[8192];
+    __shared__ alignas(256) half B_smem[8192];  
+    alignas(64) float reg[128];
+    __shared__ alignas(8) uint tmem_addr[1];
+    /* ---- allocate 64-column TMEM -------------------------------- */
+    alignas(64) uint64_t descA[1];
+    alignas(64) uint64_t descB[1];
+    alignas(64) uint descI[1];
+
+    //to do how many tmem needed?
+    if (((int)threadIdx.x) < 32) {
+        unsigned int smem_addr = __cvta_generic_to_shared(tmem_addr);
+        __asm__ __volatile__(
+            "tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32  [%0], %1;"
+            :: "r"(smem_addr), "r"(512)
+            : "memory"
+            );
+    }
+
+    __shared__ unsigned long long sem;
+    if (((int)threadIdx.x) == 0) {
             asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "l"(&sem));
-            sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
-        }
+            uint64_t sem_addr = static_cast<uint64_t>(__cvta_generic_to_shared(&sem));
+    }
+
+    __shared__ unsigned long long producer_sem_A;
+
+    //needs two cta's load to arrived 
+    if (((int)threadIdx.x) == 0 && rank == 0) {
+        asm volatile("mbarrier.init.shared::cta.b64 [%0], 2;" :: "l"(&producer_sem_A));
+    }
+    __shared__ unsigned long long producer_sem_B;
+    if (((int)threadIdx.x) == 0 && rank == 0) {
+        asm volatile("mbarrier.init.shared::cta.b64 [%0], 2;" :: "l"(&producer_sem_B));
+    }
+
+
     for (int kkk = 0; kkk<(prob.K + Kb - 1)/Kb; ++kkk)  // split-K loop
     {   
         int tileK = kkk;  
@@ -304,8 +352,8 @@ extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(
             int col    = col_cp * 8;                  // 8 halfs
             int sm_idx = swizzle(row0_w + row_off, col);
             char* s_dst = reinterpret_cast<char*>(&A_smem[sm_idx]);
-
-            cp_async_16B(g_src, s_dst);
+            cluster_load_async(g_src, s_dst, producer_sem_A, rank);
+            //load_async(g_src, s_dst);
         }
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n" ::: "memory");
@@ -327,66 +375,65 @@ extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(
             int sm_idx = swizzle(row0_w + row_off, col);
             char* s_dst = reinterpret_cast<char*>(&B_smem[sm_idx]);
 
-            cp_async_16B(g_src, s_dst);
+            cluster_load_async(g_src, s_dst, producer_sem_B, rank);
         }
         asm volatile("cp.async.commit_group;\n");
         asm volatile("cp.async.wait_group 0;\n" ::: "memory");
 
-        if (((int)threadIdx.x) == 0) {
-            asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
-        }
-        mbarrier_wait<0>(&sem);
+
+
         asm volatile("tcgen05.fence::before_thread_sync;\n");
         asm volatile("bar.sync 0;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n");
-
         KDBG("tiles copied to SMEM");
-        if (((int)threadIdx.x) == 0) {
-            ptx_tcgen05_encode_instr_descriptor(descI, 128, 128, 1, 0, 0, false, false, false, false, false, false);
+        if (((int)threadIdx.x) == 0 && rank == 0) {
+            //the shape should be changed
+            //to do: 128*258*64?
+            ptx_tcgen05_encode_instr_descriptor(descI, 128, 256, 1, 0, 0, false, false, false, false, false, false);
             for (int k = 0; k < 4; ++k) {
-            ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
-            ptx_tcgen05_encode_matrix_descriptor(descB, (&(B_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
-            if (k == 0) {
-                //todo goto 256*256
-                {
-                    /* T.ptx_tcgen05_mma() */
-                    asm volatile(
-                        "{\n"
-                        ".reg .pred p;\n"
-                        "setp.eq.u32 p, 1, 0;\n"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
-                        "{%5, %6, %7, %8}, p;\n"
-                        "}\n"
-                        :
-                        : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(0), "r"(0), "r"(0), "r"(0), "r"(0)
-                    );
-                }
-            } else {
-                
-                {
-                    /* T.ptx_tcgen05_mma() */
-                    asm volatile(
-                        "{\n"
-                        ".reg .pred p;\n"
-                        "setp.eq.u32 p, 1, 1; \n"
-                        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
-                        "{%5, %6, %7, %8}, p;\n"
-                        "}\n"
-                        :
-                        : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(1), "r"(0), "r"(0), "r"(0), "r"(0)
-                    );
+                ptx_tcgen05_encode_matrix_descriptor(descA, (&(A_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
+                ptx_tcgen05_encode_matrix_descriptor(descB, (&(B_smem[(((k * 2) ^ (((k * 2) & 56) >> 3)) << 3)])), 1, 64, 3);
+                if (k == 0) {
+                    {
+                        /* T.ptx_tcgen05_mma() */
+                        asm volatile(
+                            "{\n"
+                            ".reg .pred p;\n"
+                            "setp.eq.u32 p, 1, 0;\n"
+                            "tcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, "
+                            "{%5, %6, %7, %8}, p;\n"
+                            "}\n"
+                            :
+                            : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(0), "r"(0), "r"(0), "r"(0), "r"(0)
+                        );
+                    }
+                } else {
+                    
+                    {
+                        /* T.ptx_tcgen05_mma() */
+                        asm volatile(
+                            "{\n"
+                            ".reg .pred p;\n"
+                            "setp.eq.u32 p, 1, 1; \n"
+                            "tcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, "
+                            "{%5, %6, %7, %8}, p;\n"
+                            "}\n"
+                            :
+                            : "r"(tmem_addr[0]), "l"(descA[0]), "l"(descB[0]), "r"(descI[0]), "r"(1), "r"(0), "r"(0), "r"(0), "r"(0)
+                        );
+                    }
                 }
             }
-            }
-            //todo :group 2
-            asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [%0];" :: "l"(sem_addr) : "memory");
+            //broadcast mbarrier
+            asm volatile(
+                "tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;\n"
+            ::  "l"(&sem), "h"((uint16_t)(0b11))
+            );
         }
-
-
 
         /* ---- wait for commit ---------------------------------------- */
         KDBG("waiting on mbarrier");
-        mbarrier_wait<1>(&sem);
+        mbarrier_wait<0>(&sem);
         KDBG("mbarrier passed");
         asm volatile("tcgen05.fence::before_thread_sync;\n");
         asm volatile("bar.sync 0;\n");
@@ -400,45 +447,45 @@ extern "C" __global__ void __cluster_dims__(2) __launch_bounds__(128) umma_tile(
             
             {
                 /* T.ptx_tcgen05_ld() */
+                //todo check whether we load correct index
                 asm volatile(
                     "tcgen05.ld.sync.aligned.32x32b.x1.b32 "
                     "{%0}, "
                     "[%1];\n"
                     :  "=r"(*(uint32_t*)&reg[i_1])
-                    :  "r"(get_tmem_addr(tmem_addr[0],  threadIdx.x /32 *32, i_1))
+                    :  "r"(get_tmem_addr(tmem_addr[0],  threadIdx.x /32 *32, i_1+ rank*128))
                 );
             }
         }
         asm volatile(
-                    "tcgen05.wait::ld.sync.aligned;"
-                );
+            "tcgen05.wait::ld.sync.aligned;"
+        );
         for (int i_2 = 0; i_2 < 128; ++i_2) {
             acc[i_2] += reg[i_2];
         }
-            asm volatile("tcgen05.fence::before_thread_sync;\n");
+        asm volatile("tcgen05.fence::before_thread_sync;\n");
         asm volatile("bar.sync 0;\n");
         asm volatile("tcgen05.fence::after_thread_sync;\n");
         KDBG("column written to global");
     }
     const int row = threadIdx.x;           // 0…127 inside the tile
-const int gRow = row0 + row;           // absolute row
-//todo add offset
-#pragma unroll
-for (int n=0; n<Nb; ++n) {             // Nb == 128
-    const int gCol = col0 + n;         // absolute column
-    const int idx  = gRow * prob.N + gCol;
-    C[idx] = acc[n];                   // or atomicAdd() for split-K
-}
+    const int gRow = row0 + row;           // absolute row
+
+    #pragma unroll
+    for (int n=0; n<Nb; ++n) {             // Nb == 128
+        const int gCol = col0 + n;         // absolute column
+        const int idx  = gRow * prob.N + gCol;
+        C[idx] = acc[n];                   // or atomicAdd() for split-K
+    }
     __syncthreads();
     /* ---- deallocate --------------------------------------------- */
     if (((int)threadIdx.x) < 32) {
-    
-    // deallocate 512 bytes of TMEM    
+        // deallocate 512 bytes of TMEM    
         __asm__ __volatile__(
-      "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
-      :: "r"(tmem_addr[0]), "r"(512)
-      : "memory"
-    );
+        "tcgen05.dealloc.cta_group::2.sync.aligned.b32 %0, %1;"
+        :: "r"(tmem_addr[0]), "r"(512)
+        : "memory"
+        );
   }
 }
 
@@ -588,6 +635,7 @@ int run_benchmark()
               << "  |  time = " << time_sec * 1e3 << " ms"
               << "  |  throughput = " << tflops << " TFLOPS\n";
     
+
     cudaFree(dA); cudaFree(dB); cudaFree(dC);
     return 0;
 
